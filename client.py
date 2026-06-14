@@ -1,197 +1,148 @@
 import socket
 import time
-import argparse
-import threading
+import argparse 
+import threading 
+import math
 
-PROXY_HOST = "127.0.0.1"
+
+PROXY_HOST = "192.168.1.11"       
 PROXY_PORT = 8080
 
-BUFFER_SIZE = 4096
-
-UDP_HOST = "127.0.0.1"
+WEB_HOST = "192.168.1.10"         
 UDP_PORT = 9000
 
-UDP_PACKET_COUNT = 10
-UDP_TIMEOUT = 3
+BUFFER = 4096
 
-def mode_tcp(path = "/"):
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    try: 
-        print("Mode TCP")
-        print("Client mengirim permintaan ke proxy...",)
+def tcp(path="/index.html"):
+    try:
+        start = time.time()
 
-        start_time = time.time()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((PROXY_HOST, PROXY_PORT))
 
-        client_socket.connect((PROXY_HOST, PROXY_PORT))
-
-        request = (
+        req = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {PROXY_HOST}\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
+            f"Connection: close\r\n\r\n"
         )
 
-        client_socket.sendall(request.encode('utf-8'))
+        s.sendall(req.encode())
 
-        response = b""
-
+        res = b""
         while True:
-            data = client_socket.recv(BUFFER_SIZE)
+            data = s.recv(BUFFER)
             if not data:
                 break
-            response += data
-        
-        end_time = time.time()
-        response_time = end_time - start_time
+            res += data
 
-        response_text = response.decode("utf-8", errors="ignore")
-        status_line = response_text.split("\r\n")[0] 
+        s.close()
 
-        print("Response diterima dari proxy")
-        print("Status:", status_line)
-        print("Response time:", round(response_time, 4), "detik")
-        print("Ukuran response:", len(response), "bytes")
-        print("\nIsi response:")
-        print(response_text)
-    
-    except ConnectionRefusedError:
-        print("Gagal terhubung ke proxy.")
-        print("Pastikan proxy server sudah berjalan di port", PROXY_PORT)
+        text = res.decode(errors="ignore")
+        status = text.split("\r\n")[0]
 
-    except Exception as error:
-        print("Error:", error)
-    
-    finally:
-        client_socket.close()
+        print("Mode TCP")
+        print("Status:", status)
+        print("Response time:", round(time.time() - start, 4), "detik")
+        print("Ukuran response:", len(res), "bytes")
+        print("\nIsi response:\n", text)
 
-def mode_udp():
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.settimeout(UDP_TIMEOUT)
+    except Exception as e:
+        print("Error TCP:", e)
 
-    rtt_list = []
-    packet_sent = 0
-    packet_received = 0
-    total_bytes_received = 0
 
-    print("Mode UDP QOS")
-    print("Client mengirim packet UDP ke server...")
+def udp():
+    rtts = []
+    sent = 10
+    received = 0
+    total_bytes = 0
 
-    start_udp_time = time.time()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1)
 
-    for i in range(1, UDP_PACKET_COUNT + 1):
-        message = f"Packet UDP ke-{i}"
+    print("Mode UDP QoS")
+
+    start_total = time.time()
+
+    for i in range(1, sent + 1):
+        msg = f"ping {i} {time.time()}"
 
         try:
-            start_time = time.time()
+            start = time.time()
+            s.sendto(msg.encode(), (WEB_HOST, UDP_PORT))
+            data, _ = s.recvfrom(BUFFER)
 
-            udp_socket.sendto(message.encode("utf-8"), (UDP_HOST, UDP_PORT))
-            packet_sent += 1
-            data, server_address = udp_socket.recvfrom(BUFFER_SIZE)
-
-            end_time = time.time()
-            rtt = end_time - start_time
-
-            rtt_list.append(rtt)
-            packet_received += 1
-            total_bytes_received += len(data)
+            rtt = time.time() - start
+            rtts.append(rtt)
+            received += 1
+            total_bytes += len(data)
 
             print("Packet", i, "RTT", round(rtt, 4), "detik")
 
         except socket.timeout:
             print("Packet", i, "timeout")
 
-        except Exception as error:
-            print("Packet", i, "error", error)
-        
-    udp_socket.close()
+    s.close()
 
-    end_udp_time = time.time()
-    total_time = end_udp_time - start_udp_time
+    total_time = time.time() - start_total
+    lost = sent - received
+    loss = lost / sent * 100
 
-    packet_lost = packet_sent - packet_received
-
-    if packet_sent > 0:
-        packet_loss = (packet_lost / packet_sent) * 100
+    if rtts:
+        min_rtt = min(rtts)
+        avg_rtt = sum(rtts) / len(rtts)
+        max_rtt = max(rtts)
     else:
-        packet_loss = 0
+        min_rtt = avg_rtt = max_rtt = 0
 
-    # Hitung Jitter (rata-rata selisih absolut antara RTT berturut-turut)
-    jitter = 0
-    if len(rtt_list) > 1:
-        jitter = sum(abs(rtt_list[j] - rtt_list[j-1]) for j in range(1, len(rtt_list))) / (len(rtt_list) - 1)
+    diff = [rtts[i] - rtts[i - 1] for i in range(1, len(rtts))]
+    jitter = math.sqrt(sum(x * x for x in diff) / len(diff)) if diff else 0
 
-    # Hitung Throughput
-    throughput_bytes_per_sec = 0
-    throughput_kbps = 0
-    if total_time > 0:
-        throughput_bytes_per_sec = total_bytes_received / total_time
-        throughput_kbps = (total_bytes_received * 8) / (total_time * 1000)
+    throughput = (total_bytes * 8) / (total_time * 1000) if total_time > 0 else 0
 
-    print("\nStatistik RTT:")
-
-    if len(rtt_list) > 0:
-        min_rtt = min(rtt_list)
-        avg_rtt = sum(rtt_list) / len(rtt_list)
-        max_rtt = max(rtt_list)
-
-        print("Min RTT:", round(min_rtt, 4), "detik")
-        print("Avg RTT:", round(avg_rtt, 4), "detik")
-        print("Max RTT:", round(max_rtt, 4), "detik")
-    
-    else: 
-        print("Min RTT: -")
-        print("Avg RTT: -")
-        print("Max RTT: -")
-
+    print("\nStatistik QoS")
+    print("Min RTT:", round(min_rtt, 4), "detik")
+    print("Avg RTT:", round(avg_rtt, 4), "detik")
+    print("Max RTT:", round(max_rtt, 4), "detik")
     print("Jitter:", round(jitter, 6), "detik")
-    print("Throughput:", round(throughput_bytes_per_sec, 2), "Bytes/detik (", round(throughput_kbps, 4), "kbps)")
-    print("Packet dikirim:", packet_sent)
-    print("Packet diterima:", packet_received)
-    print("Packet hilang:", packet_lost)
-    print("Packet loss:", round(packet_loss, 2), "%")
+    print("Throughput:", round(throughput, 4), "kbps")
+    print("Packet dikirim:", sent)
+    print("Packet diterima:", received)
+    print("Packet hilang:", lost)
+    print("Packet loss:", round(loss, 2), "%")
 
-def mode_multi():
-    print("Simulasi multi-client")
-    print("Menjalankan 5 instance client.py")
+
+def multi(path="/index.html"):
+    print("Mode Multi Client")
 
     threads = []
 
-    for i in range(1,6):
-        thread = threading.Thread(target=mode_tcp, args=("/",))
-        threads.append(thread)
-        thread.start()
+    for i in range(5):
+        t = threading.Thread(target=tcp, args=(path,))
+        threads.append(t)
+        t.start()
+        print("Client", i + 1, "dijalankan")
 
-        print("client instance", i, "dijalankan")
+    for t in threads:
+        t.join()
 
-    for thread in threads:
-        thread.join() 
+    print("Semua client selesai")
 
-    print("Semua instance menerima response tanpa blocking/crash")
 
 def main():
-    parser = argparse.ArgumentParser()  
-
-    parser.add_argument(
-        "--mode",
-        choices=["tcp", "udp", "multi"],
-        required=True,
-        help="Pilih mode: tcp, udp, atau multi"
-    )  
-
-
-    args = parser.parse_args()  
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["tcp", "udp", "multi"], required=True)
+    parser.add_argument("--path", default="/index.html")
+    args = parser.parse_args()
 
     if args.mode == "tcp":
-        mode_tcp()  
-
+        tcp(args.path)
     elif args.mode == "udp":
-        mode_udp() 
-
+        udp()
     elif args.mode == "multi":
-        mode_multi()  
+        multi(args.path)
 
 
 if __name__ == "__main__":
-    main()  
-
+    main()
